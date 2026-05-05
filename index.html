@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Casdoor SSO</title>
+</head>
+<body>
+
+    <h1>Casdoor Login (Token in Cookie)</h1>
+
+    <div id="status">Checking status...</div>
+    <br>
+
+    <button onclick="window.location.href='/login'">Login with Casdoor</button>
+
+    <button onclick="getUserInfo()">Get User Info</button>
+
+    <pre id="output" style="margin-top: 20px; background: #eee; padding: 10px; max-width: 500px; display: none;"></pre>
+
+    <script>
+        window.onload = async function() {
+            const response = await fetch('/user-info');
+            if (response.ok) {
+                document.getElementById('status').innerText = 'Already logged in!';
+            } else {
+                document.getElementById('status').innerText = 'Not logged in.';
+            }
+        };
+
+        async function getUserInfo() {
+            const outputDiv = document.getElementById('output');
+            outputDiv.style.display = 'block';
+            outputDiv.innerText = 'Loading...';
+
+            try {
+                const response = await fetch('/user-info');
+                if (response.ok) {
+                    const data = await response.json();
+                    outputDiv.innerText = JSON.stringify(data, null, 2);
+                } else {
+                    outputDiv.innerText = "Error 401: Unauthorized (Please login first)";
+                }
+            } catch (error) {
+                outputDiv.innerText = "Connection error.";
+            }
+        }
+    </script>
+
+</body>
+</html>
