@@ -2,14 +2,74 @@ import ssl
 import uvicorn
 import httpx
 import jwt
-from fastapi import FastAPI, Request, HTTPException
+import asyncio
+import json
+import websockets
+from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect
+from contextlib import asynccontextmanager
+from typing import Dict, List
+
+import schema_pb2
+
 from cryptography.hazmat.primitives.serialization import pkcs12
 from cryptography.hazmat.primitives import serialization
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from fastapi.responses import RedirectResponse, HTMLResponse
 
-app = FastAPI()
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[WebSocket, List[str]] = {}
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections[websocket] = []
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            del self.active_connections[websocket]
+
+    def subscribe(self, websocket: WebSocket, symbols: List[str]):
+        self.active_connections[websocket] = symbols
+
+    async def broadcast(self, symbol: str, price: str, event_time: int):
+        proto_msg = schema_pb2.TickerData(symbol=symbol, price=price, event_time=event_time)
+        binary_data = proto_msg.SerializeToString()
+
+        for ws, subscriptions in list(self.active_connections.items()):
+            if symbol in subscriptions:
+                try:
+                    await ws.send_bytes(binary_data)
+                except Exception:
+                    pass
+
+manager = ConnectionManager()
+
+async def binance_listener():
+    uri = "wss://stream.binance.com:9443/ws/btcusdt@ticker/ethusdt@ticker/bnbusdt@ticker/solusdt@ticker"
+    while True:
+        try:
+            async with websockets.connect(uri) as ws:
+                while True:
+                    data = await ws.recv()
+                    msg = json.loads(data)
+                    symbol = msg.get('s')
+                    price = msg.get('c')
+                    time = msg.get('E')
+                    if symbol and price:
+                        await manager.broadcast(symbol, price, time)
+        except Exception as e:
+            print(f"Зв'язок з Binance розірвано. Перепідключення... {e}")
+            await asyncio.sleep(5)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(binance_listener())
+    yield
+    task.cancel()
+
+app = FastAPI(lifespan=lifespan)
+
 
 CASDOOR_URL = "http://localhost:9000"
 CLIENT_ID = "d02c3b75740b01aca48b"
@@ -47,10 +107,8 @@ Ug==
 -----END CERTIFICATE-----
 """
 
-# Програмно читаємо сертифікат і дістаємо з нього чистий публічний ключ
 cert_obj = x509.load_pem_x509_certificate(CASDOOR_PUBLIC_CERT.encode('utf-8'), default_backend())
 PUBLIC_KEY = cert_obj.public_key()
-
 
 @app.get("/")
 def serve_frontend():
@@ -58,8 +116,7 @@ def serve_frontend():
         with open("index.html", "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read())
     except FileNotFoundError:
-        return HTMLResponse(
-            content="<h1>Помилка!</h1><p>Файл index.html не знайдено.")
+        return HTMLResponse(content="<h1>Помилка!</h1><p>Файл index.html не знайдено.")
 
 @app.get("/login")
 def login(request: Request):
@@ -90,7 +147,6 @@ async def callback(code: str):
     response.set_cookie(key="auth_token", value=access_token, httponly=True)
     return response
 
-
 @app.get("/user-info")
 async def user_info(request: Request):
     token = request.cookies.get("auth_token")
@@ -99,16 +155,8 @@ async def user_info(request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized: Ви не авторизовані")
 
     try:
-        # Локально валідуємо токен за допомогою нашого публічного ключа
-        payload = jwt.decode(
-            token,
-            PUBLIC_KEY,
-            algorithms=["RS256"],
-            options={"verify_aud": False}
-        )
-
+        payload = jwt.decode(token, PUBLIC_KEY, algorithms=["RS256"], options={"verify_aud": False})
         return payload
-
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Unauthorized: Термін дії токена закінчився")
     except jwt.InvalidTokenError as e:
@@ -120,6 +168,33 @@ async def user_info(request: Request):
 def hello():
     return {"message": "Hello from Istoshyn Pavlo KP-32"}
 
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    token = websocket.cookies.get("auth_token")
+    if not token:
+        await websocket.close(code=1008, reason="Missing Token")
+        return
+
+    try:
+        jwt.decode(token, PUBLIC_KEY, algorithms=["RS256"], options={"verify_aud": False})
+    except Exception:
+        await websocket.close(code=1008, reason="Invalid Token")
+        return
+
+    await manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            payload = json.loads(data)
+
+            if payload.get("action") == "subscribe":
+                symbols = payload.get("symbols", [])
+                manager.subscribe(websocket, symbols)
+                print(f"Клієнт підписався на: {symbols}")
+
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+        print("Клієнт відключився")
 
 def run_secure_server():
     p12_filepath = "localhost+1.p12"
@@ -132,10 +207,7 @@ def run_secure_server():
         print(f"Помилка: Файл сертификата {p12_filepath} не знайдено")
         return
 
-    private_key, certificate, additional_certs = pkcs12.load_key_and_certificates(
-        p12_data,
-        password
-    )
+    private_key, certificate, additional_certs = pkcs12.load_key_and_certificates(p12_data, password)
 
     temp_cert_path = "temp_cert.pem"
     temp_key_path = "temp_key.pem"
@@ -161,7 +233,6 @@ def run_secure_server():
         ssl_version=ssl.PROTOCOL_TLSv1_2,
         ssl_ciphers=my_ciphers
     )
-
 
 if __name__ == "__main__":
     run_secure_server()

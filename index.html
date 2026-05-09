@@ -2,28 +2,125 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Casdoor SSO</title>
+    <title>Secure Real-Time Crypto</title>
+    <script src="https://cdn.jsdelivr.net/npm/protobufjs@7.2.5/dist/protobuf.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            max-width: 700px;
+        }
+
+        .controls {
+            margin-bottom: 20px;
+        }
+
+        .checkbox-group {
+            display: flex;
+            flex-direction: row;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin-bottom: 15px;
+            align-items: center;
+        }
+
+        #tickers {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .ticker-box {
+            border: 1px solid #ccc;
+            padding: 15px;
+            border-radius: 8px;
+            background-color: #f9f9f9;
+            width: 250px;
+        }
+
+        .symbol-name {
+            font-size: 14px;
+            color: #555;
+            margin-bottom: 5px;
+        }
+
+        .price {
+            font-size: 24px;
+            font-weight: bold;
+            color: #28a745;
+        }
+
+        .flash-update {
+            animation: highlight 0.5s ease-out;
+        }
+
+        @keyframes highlight {
+            0% { background-color: #d4edda; transform: scale(1.02); }
+            100% { background-color: #f9f9f9; transform: scale(1); }
+        }
+
+        #output {
+            margin-top: 20px;
+            background: #eee;
+            padding: 10px;
+            border-radius: 5px;
+            display: none;
+            overflow-x: auto;
+        }
+    </style>
 </head>
 <body>
 
-    <h1>Casdoor Login (Token in Cookie)</h1>
+    <h1>Secure WebSocket Crypto Tracker</h1>
+    <div id="status" style="margin-bottom: 15px; font-weight: bold;">Checking authentication...</div>
 
-    <div id="status">Checking status...</div>
-    <br>
+    <div class="controls">
+        <button onclick="window.location.href='/login'">Login with Casdoor</button>
+        <button onclick="getUserInfo()">Get User Info</button>
+    </div>
 
-    <button onclick="window.location.href='/login'">Login with Casdoor</button>
+    <pre id="output"></pre>
+    <hr>
 
-    <button onclick="getUserInfo()">Get User Info</button>
+    <div id="workspace" style="display: none;">
+        <h3>Виберіть монети для підписки:</h3>
+        <div class="checkbox-group">
+            <label><input type="checkbox" class="crypto-sub" value="BTCUSDT"> Bitcoin (BTC)</label>
+            <label><input type="checkbox" class="crypto-sub" value="ETHUSDT"> Ethereum (ETH)</label>
+            <label><input type="checkbox" class="crypto-sub" value="BNBUSDT"> Binance Coin (BNB)</label>
+            <label><input type="checkbox" class="crypto-sub" value="SOLUSDT"> Solana (SOL)</label>
+            <button onclick="updateSubscriptions()" style="padding: 8px 15px; cursor: pointer;">Підписатись</button>
+        </div>
 
-    <pre id="output" style="margin-top: 20px; background: #eee; padding: 10px; max-width: 500px; display: none;"></pre>
+        <h3 style="margin-top: 30px;">Дані в реальному часі (Protobuf):</h3>
+        <div id="tickers"></div>
+    </div>
 
     <script>
+        let ws;
+        let TickerDataMessage;
+
+        const protoSchema = `
+        syntax = "proto3";
+        message TickerData {
+            string symbol = 1;
+            string price = 2;
+            int64 event_time = 3;
+        }`;
+
+        const root = protobuf.parse(protoSchema).root;
+        TickerDataMessage = root.lookupType("TickerData");
+
         window.onload = async function() {
             const response = await fetch('/user-info');
             if (response.ok) {
-                document.getElementById('status').innerText = 'Already logged in!';
+                document.getElementById('status').innerText = 'Status: Authenticated ✅';
+                document.getElementById('status').style.color = 'green';
+                document.getElementById('workspace').style.display = 'block';
+                connectWebSocket();
             } else {
-                document.getElementById('status').innerText = 'Not logged in.';
+                document.getElementById('status').innerText = 'Status: Not logged in ❌. Please login first.';
+                document.getElementById('status').style.color = 'red';
             }
         };
 
@@ -44,7 +141,69 @@
                 outputDiv.innerText = "Connection error.";
             }
         }
-    </script>
 
+        function connectWebSocket() {
+            ws = new WebSocket("wss://localhost:8000/ws");
+            ws.binaryType = "arraybuffer";
+
+            ws.onopen = () => {
+                console.log("Secure WebSocket Connected!");
+            };
+
+            ws.onmessage = (event) => {
+                const buffer = new Uint8Array(event.data);
+                const message = TickerDataMessage.decode(buffer);
+
+                updateTickerUI(message.symbol, message.price);
+            };
+
+            ws.onclose = (e) => {
+                console.log("WebSocket Disconnected. Reason code: ", e.code);
+                if(e.code === 1008) {
+                    alert("WebSocket Authorization Failed! Terminated.");
+                }
+            };
+        }
+
+        function updateSubscriptions() {
+            const checkboxes = document.querySelectorAll('.crypto-sub:checked');
+            const symbols = Array.from(checkboxes).map(cb => cb.value);
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    action: "subscribe",
+                    symbols: symbols
+                }));
+                document.getElementById("tickers").innerHTML = "";
+            }
+        }
+
+        function updateTickerUI(symbol, price) {
+            let container = document.getElementById(`ticker-${symbol}`);
+            const formattedPrice = parseFloat(price).toFixed(2);
+
+            if (!container) {
+                container = document.createElement("div");
+                container.id = `ticker-${symbol}`;
+                container.className = "ticker-box";
+                container.innerHTML = `
+                    <div class="symbol-name">${symbol}</div>
+                    <div class="price" id="price-${symbol}">$${formattedPrice}</div>
+                `;
+                document.getElementById("tickers").appendChild(container);
+            } else {
+                const priceElement = document.getElementById(`price-${symbol}`);
+                const currentDisplayedPrice = priceElement.innerText.replace('$', '');
+
+                if (currentDisplayedPrice !== formattedPrice) {
+                    priceElement.innerText = `$${formattedPrice}`;
+
+                    container.classList.remove("flash-update");
+                    void container.offsetWidth;
+                    container.classList.add("flash-update");
+                }
+            }
+        }
+    </script>
 </body>
 </html>
